@@ -3,6 +3,9 @@
 Nơi khai báo tất cả các "món đồ nghề" mà ReAct Agent có thể gọi.
 """
 
+
+
+
 def get_weather(location: str) -> str:
     """
     Tra cứu thời tiết hiện tại của một thành phố.
