@@ -5,6 +5,39 @@ Chủ đề: Trợ lý tra cứu đơn hàng và xử lý đổi trả (E-commer
 
 import json
 
+# ==========================================
+# CƠ SỞ DỮ LIỆU GIẢ LẬP (MOCK DATABASE & SYNONYMS)
+# ==========================================
+
+# 1. Từ điển đồng nghĩa để chuẩn hóa ngành hàng (Fuzzy mapping)
+CATEGORY_SYNONYMS = {
+    "thời trang": "Thời trang",
+    "quần áo": "Thời trang",
+    "áo": "Thời trang",
+    "quần": "Thời trang",
+    "váy": "Thời trang",
+    "giày": "Thời trang",
+    "điện tử": "Điện tử",
+    "thiết bị": "Điện tử",
+    "máy tính": "Điện tử",
+    "tai nghe": "Điện tử",
+    "mỹ phẩm": "Mỹ phẩm",
+    "son": "Mỹ phẩm",
+    "kem": "Mỹ phẩm",
+    "skincare": "Mỹ phẩm"
+}
+
+# 2. Database quy định chính sách đổi trả theo ngành hàng
+POLICIES_DB = {
+    "Thời trang": "Cho phép đổi trả trong vòng 7 ngày kể từ ngày giao hàng. Sản phẩm phải còn nguyên mác, chưa qua sử dụng.",
+    "Điện tử": "Cho phép đổi trả trong vòng 3 ngày nếu có lỗi từ nhà sản xuất (yêu cầu có video khui hộp/unboxing).",
+    "Mỹ phẩm": "Không hỗ trợ đổi trả nếu sản phẩm đã bị bóc màng co hoặc đã mở nắp sử dụng (trừ trường hợp kích ứng có chứng nhận y tế)."
+}
+
+
+# ==========================================
+# ĐỊNH NGHĨA CÁC CÔNG CỤ (TOOLS)
+# ==========================================
 
 def get_order_status(order_id: str) -> str:
     """
@@ -56,28 +89,48 @@ def get_order_status(order_id: str) -> str:
 
 def check_return_policy(category: str) -> str:
     """
-    Tra cứu chính sách đổi trả của cửa hàng dựa trên Ngành hàng.
+    Tra cứu chính sách đổi trả chính thức của cửa hàng dựa trên Ngành hàng hoặc loại sản phẩm.
+    Nếu tham số truyền vào chung chung, hệ thống tự động trả về chính sách của toàn bộ các ngành hàng.
     
     Args:
-        category (str): Ngành hàng của sản phẩm (Ví dụ: 'Thời trang', 'Điện tử', 'Mỹ phẩm')
+        category (str): Ngành hàng hoặc loại sản phẩm (Ví dụ: 'Thời trang', 'Điện tử', 'chung', 'tất cả')
         
     Returns:
-        str: Quy định đổi trả cụ thể cho ngành hàng đó
+        str: Chuỗi JSON chứa chính sách đổi trả chi tiết.
     """
     try:
-        cat_lower = category.strip().lower()
+        cat_clean = category.lower() if category else ""
         
-        if "thời trang" in cat_lower or "quần áo" in cat_lower:
-            return "Chính sách THỜI TRANG: Cho phép đổi trả trong vòng 7 ngày kể từ ngày giao hàng. Sản phẩm phải còn nguyên mác, chưa qua sử dụng."
-        elif "điện tử" in cat_lower or "thiết bị" in cat_lower:
-            return "Chính sách ĐIỆN TỬ: Cho phép đổi trả trong vòng 3 ngày nếu có lỗi từ nhà sản xuất. Yêu cầu có video khui hộp (unboxing)."
-        elif "mỹ phẩm" in cat_lower:
-            return "Chính sách MỸ PHẨM: Không hỗ trợ đổi trả nếu sản phẩm đã bị bóc màng co hoặc đã mở nắp sử dụng (trừ trường hợp kích ứng có chứng nhận y tế)."
-        else:
-            return f"LỖI: Ngành hàng '{category}' không thuộc danh mục hỗ trợ đổi trả tự động hoặc không tồn tại."
-            
+        # Danh sách các từ khóa ám chỉ câu hỏi chung về chính sách
+        general_keywords = ["chung", "tất cả", "all", "các ngành", "mọi ngành", "lý do", "chính sách", "quy định", "hỗ trợ"]
+        is_general_query = any(kw in cat_clean for kw in general_keywords) or not cat_clean
+        
+        # Thử khớp với ngành cụ thể nếu không phải câu hỏi chung
+        matched_category = None
+        if not is_general_query:
+            for key, value in CATEGORY_SYNONYMS.items():
+                if key in cat_clean:
+                    matched_category = value
+                    break
+                    
+        # Nếu là câu hỏi chung HOẶC không khớp ngành cụ thể nào -> Trả về TOÀN BỘ chính sách
+        if is_general_query or not matched_category:
+            return json.dumps({
+                "success": True,
+                "scope": "Toàn bộ cửa hàng",
+                "note": "Đã tự động truy xuất dữ liệu chính sách của tất cả các phân khúc ngành hàng do yêu cầu chung.",
+                "policies": POLICIES_DB
+            }, ensure_ascii=False)
+
+        # Trường hợp khớp chính xác một ngành hàng cụ thể
+        return json.dumps({
+            "success": True,
+            "category": matched_category,
+            "policy": POLICIES_DB[matched_category]
+        }, ensure_ascii=False)
+        
     except Exception as e:
-        return f"LỖI: Đã xảy ra sự cố khi kiểm tra chính sách: {str(e)}"
+        return json.dumps({"success": False, "error": f"Lỗi hệ thống khi tra cứu chính sách: {str(e)}"}, ensure_ascii=False)
 
 
 def create_return_request(order_id: str, reason: str) -> str:
@@ -136,13 +189,15 @@ if __name__ == "__main__":
     print(get_order_status("DH000"))
     
     # 2. Test check_return_policy
-    print("\n[Test 3] Kiểm tra chính sách ngành hàng:")
+    print("\n[Test 3] Kiểm tra chính sách ngành hàng cụ thể:")
     print(check_return_policy("Thời trang"))
+    print("\n[Test 4] Kiểm tra chính sách khi khách hỏi chung chung:")
+    print(check_return_policy("quy định chung"))
     
     # 3. Test create_return_request
-    print("\n[Test 4] Tạo yêu cầu đổi trả hợp lệ:")
+    print("\n[Test 5] Tạo yêu cầu đổi trả hợp lệ:")
     print(create_return_request("DH123", "Mặc bị chật size"))
-    print("\n[Test 5] Tạo yêu cầu đổi trả cho đơn đã quá hạn:")
+    print("\n[Test 6] Tạo yêu cầu đổi trả cho đơn đã quá hạn:")
     print(create_return_request("DH789", "Không thích nữa"))
     
     print("\n--- HOÀN THÀNH KIỂM THỬ ---")
