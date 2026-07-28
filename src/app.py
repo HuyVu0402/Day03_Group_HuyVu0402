@@ -33,19 +33,50 @@ def run_tool(tool_name: str, *args):
         return f"LỖI: Không tìm thấy tool '{tool_name}' trong registry."
 
     try:
-        return tool_func(*args)
-    except TypeError as exc:
-        return f"LỖI: Tool '{tool_name}' không phù hợp với tham số đã truyền: {exc}"
+        result = tool_func(*args)
+        if result is None:
+            return "LỖI: Tool không trả về dữ liệu."
+        if isinstance(result, (dict, list)):
+            return json.dumps(result, ensure_ascii=False)
+        return str(result)
+    except Exception as exc:
+        return f"LỖI: Tool '{tool_name}' gặp sự cố: {exc}"
+
+
+def build_final_answer(provider, user_query: str, observation: str = "") -> str:
+    """Tạo final answer an toàn khi provider hoặc tool gặp sự cố."""
+    if observation and str(observation).strip():
+        prompt = (
+            "Bạn chỉ được trả lời bằng một câu trả lời cuối cùng cho người dùng, không được giải thích quá trình hoạt động.\n"
+            f"Câu hỏi: {user_query}\n"
+            f"Thông tin quan sát: {observation}"
+        )
+    else:
+        prompt = (
+            "Bạn chỉ được trả lời bằng một câu trả lời cuối cùng cho người dùng, không được giải thích quá trình hoạt động.\n"
+            f"Câu hỏi: {user_query}"
+        )
+
+    try:
+        answer = provider.generate(prompt, system_prompt=REACT_SYSTEM_PROMPT)
+        if answer and str(answer).strip():
+            return answer
+    except Exception:
+        pass
+
+    if observation and str(observation).strip():
+        return "Hiện tại tôi chưa nhận được đủ dữ liệu để trả lời chính xác, nhưng bạn có thể kiểm tra lại thông tin vừa thu được hoặc thử lại sau."
+    return "Hiện tại tôi chưa nhận được đủ dữ liệu để trả lời chính xác. Bạn có thể thử lại sau."
 
 def load_test_cases():
     """Đọc bộ test cases từ config/test_cases.json của Role 1"""
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     config_path = os.path.join(base_dir, "config", "test_cases.json")
-    
+
     # Fallback kiểm tra nếu file ở thư mục hiện tại
     if not os.path.exists(config_path):
         config_path = "test_cases.json"
-        
+
     with open(config_path, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -58,53 +89,66 @@ def run_baseline_chatbot(user_query: str, provider):
     print(f"⚙️ System Prompt: {CHATBOT_BASELINE_PROMPT.strip()}")
     
     # Gọi LLM Provider thực hiện sinh câu trả lời
-    response = provider.generate(user_query, system_prompt=CHATBOT_BASELINE_PROMPT)
+    try:
+        response = provider.generate(user_query, system_prompt=CHATBOT_BASELINE_PROMPT)
+    except Exception as exc:
+        response = f"Hiện tại tôi không thể trả lời ngay lúc này. Lỗi: {exc}"
+
     print(f"🤖 Chatbot trả lời:\n{response}")
 
+import re # Cần import thêm thư viện re ở đầu file app.py
 
 def run_react_agent(user_query: str, provider):
     """
-    Dựng vòng lặp ReAct Agent (Thought -> Action -> Observation) có Guardrails.
+    Dựng vòng lặp ReAct Agent (Thought -> Action -> Observation) thực thụ.
+    LLM tự suy luận cần dùng công cụ nào dựa trên câu hỏi của khách.
     """
-    print(f"\n🤖 [REACT AGENT] Câu hỏi: {user_query}")
+    print(f"\n🤖 [REACT AGENT] Đang xử lý: {user_query}")
+    
+    # Khởi tạo lịch sử hội thoại cho vòng lặp ReAct
+    agent_scratchpad = f"User: {user_query}\n"
     step = 0
-    normalized_query = user_query.lower()
-
-    if "trạng thái đơn hàng" in normalized_query or ("đơn hàng" in normalized_query and "trạng thái" in normalized_query):
-        tool_name = "get_order_status"
-        tool_args = ("DH123",)
-    elif "chính sách" in normalized_query and "đổi trả" in normalized_query:
-        tool_name = "check_return_policy"
-        tool_args = ("Thời trang",)
-    elif "tạo yêu cầu đổi trả" in normalized_query or ("đổi trả" in normalized_query and "tạo" in normalized_query):
-        tool_name = "create_return_request"
-        tool_args = ("DH123", "Sai kích cỡ")
-    else:
-        print("🧠 Thought: Câu hỏi này không cần gọi tool; có thể trả lời trực tiếp.")
-        print("🏁 Final Answer: Tôi sẽ trả lời dựa trên kiến thức có sẵn trong prompt.")
-        return
 
     while step < MAX_ITERATIONS:
         step += 1
-        print(f"\n--- 🔄 Vòng lặp ReAct (Step {step}/{MAX_ITERATIONS}) ---")
+        print(f"\n--- 🔄 Vòng lặp ReAct (Bước {step}/{MAX_ITERATIONS}) ---")
 
-        if step == 1:
-            print(f"🧠 Thought: Câu hỏi này cần gọi tool {tool_name} để tra cứu dữ liệu thực tế.")
-            print(f"🛠️ Action: {tool_name}{tool_args}")
+        # 1. Gửi toàn bộ quá trình suy luận hiện tại cho LLM
+        response = provider.generate(agent_scratchpad, system_prompt=REACT_SYSTEM_PROMPT)
+        print(f"{response}") # Hiển thị Thought và Action của LLM
 
-            obs = run_tool(tool_name, *tool_args)
-            print(f"👁️ Observation: {obs}")
+        # 2. Kiểm tra nếu LLM đã đưa ra câu trả lời cuối cùng
+        if "Final Answer:" in response:
+            final_answer = response.split("Final Answer:")[-1].strip()
+            print(f"\n🏁 KẾT QUẢ CUỐI CÙNG:\n{final_answer}")
+            return final_answer
 
-            final_answer = provider.generate(
-                f"Dựa trên thông tin sau, hãy trả lời câu hỏi của người dùng: {user_query}\n\nObservation: {obs}",
-                system_prompt=REACT_SYSTEM_PROMPT,
-            )
-            print(f"🏁 Final Answer:\n{final_answer}")
-            break
+        # 3. Phân tích Action để gọi Tool (Định dạng: Action: tool_name["arg1", "arg2"])
+        # Sử dụng Regex để tìm tên công cụ và các tham số bên trong ngoặc []
+        action_match = re.search(r"Action:\s*(\w+)\[(.*?)\]", response)
+        
+        if action_match:
+            tool_name = action_match.group(1)
+            # Tách các tham số, loại bỏ dấu ngoặc kép và khoảng trắng
+            args_str = action_match.group(2)
+            # Parse args: hỗ trợ cả "arg1" hoặc "arg1", "arg2"
+            tool_args = [arg.strip().strip('"').strip("'") for arg in args_str.split(",") if arg.strip()]
 
+            # 4. Thực thi Tool
+            print(f"🛠️  Đang gọi công cụ: {tool_name} với tham số {tool_args}")
+            observation = run_tool(tool_name, *tool_args)
+            print(f"👁️  Observation (Kết quả): {observation}")
+
+            # 5. Cập nhật scratchpad để LLM đọc ở vòng lặp sau
+            agent_scratchpad += f"\n{response}\nObservation: {observation}\n"
+        else:
+            # Nếu không tìm thấy Action theo định dạng ReAct, yêu cầu LLM điều chỉnh hoặc dừng lại
+            print("⚠️ Không nhận diện được Action. Đang yêu cầu AI tổng hợp câu trả lời...")
+            agent_scratchpad += f"\n{response}\nObservation: Vui lòng cung cấp đúng định dạng Thought/Action hoặc đưa ra Final Answer."
+            
     if step >= MAX_ITERATIONS:
-        print(f"🛡️ GUARDRAIL TRIGGERED: Đã đạt giới hạn tối đa {MAX_ITERATIONS} bước. Ngắt lặp an toàn!")
-
+        print(f"🛑 Đạt giới hạn {MAX_ITERATIONS} bước mà chưa có kết quả.")
+        return "Xin lỗi, tôi cần thêm thông tin hoặc bộ phận kỹ thuật để xử lý yêu cầu này."
 
 if __name__ == "__main__":
     print("==================================================")
@@ -127,3 +171,4 @@ if __name__ == "__main__":
     
     print("\n--- DEMO 2: CHẠY TRÊN REACT AGENT ---")
     run_react_agent(sample_query, provider)
+
